@@ -29,6 +29,50 @@ const closeButton = ref<HTMLButtonElement>()
 
 const target = computed(() => props.targets[index.value])
 
+// ---- resizable width: drag the left edge (or use the arrow keys); the choice is remembered
+const WIDTH_KEY = 'nomad-ops-logs-width'
+const DEFAULT_WIDTH = 820
+const MIN_WIDTH = 420
+const clampWidth = (w: number) => Math.min(Math.max(MIN_WIDTH, window.innerWidth - 48), Math.max(MIN_WIDTH, Math.round(w)))
+function storedWidth() {
+  try {
+    const v = Number(localStorage.getItem(WIDTH_KEY))
+    if (v) return clampWidth(v)
+  } catch { /* storage unavailable */ }
+  return clampWidth(DEFAULT_WIDTH)
+}
+const width = ref(storedWidth())
+const dragging = ref(false)
+function saveWidth() {
+  try { localStorage.setItem(WIDTH_KEY, String(width.value)) } catch { /* storage unavailable */ }
+}
+function gripDown(e: PointerEvent) {
+  dragging.value = true
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+}
+function gripMove(e: PointerEvent) {
+  if (dragging.value) width.value = clampWidth(window.innerWidth - e.clientX)
+}
+function gripUp() {
+  if (!dragging.value) return
+  dragging.value = false
+  saveWidth()
+}
+function gripKey(e: KeyboardEvent) {
+  const step = e.shiftKey ? 120 : 40
+  if (e.key === 'ArrowLeft') width.value = clampWidth(width.value + step)
+  else if (e.key === 'ArrowRight') width.value = clampWidth(width.value - step)
+  else if (e.key === 'Home') width.value = clampWidth(DEFAULT_WIDTH)
+  else return
+  e.preventDefault()
+  saveWidth()
+}
+function resetWidth() {
+  width.value = clampWidth(DEFAULT_WIDTH)
+  saveWidth()
+}
+const keepInWindow = () => { width.value = clampWidth(width.value) }
+
 // ---- parsing: "2026-10-11T14:36:04.957Z INFO [server] handled request path=/x ms=3" -> columns
 const LEVELS: Record<string, Level> = {
   TRACE: 'info', DEBUG: 'info', INFO: 'info', NOTICE: 'info', WARN: 'warn', WARNING: 'warn',
@@ -160,12 +204,14 @@ const parts = computed(() => (target.value?.label ?? '').split(/ · | \/ /))
 const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') emit('close') }
 onMounted(() => {
   window.addEventListener('keydown', onKey)
+  window.addEventListener('resize', keepInWindow)
   closeButton.value?.focus()
   load(true)
   schedule()
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', keepInWindow)
   window.clearInterval(timer)
   controller?.abort()
 })
@@ -174,7 +220,12 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <div class="scrim" @mousedown.self="emit('close')">
-      <aside class="drawer" role="dialog" aria-modal="true" :aria-label="`Logs ${title}`">
+      <aside class="drawer" :class="{ dragging }" :style="{ width: `${width}px` }" role="dialog" aria-modal="true" :aria-label="`Logs ${title}`">
+        <div
+          class="grip" role="separator" aria-orientation="vertical" aria-label="Resize logs" title="Drag to resize, double-click to reset"
+          tabindex="0" :aria-valuenow="width" :aria-valuemin="MIN_WIDTH" aria-valuemax="1600"
+          @pointerdown="gripDown" @pointermove="gripMove" @pointerup="gripUp" @pointercancel="gripUp" @dblclick="resetWidth" @keydown="gripKey"
+        />
         <header>
           <div class="titles">
             <h2>Logs</h2>
@@ -258,7 +309,13 @@ onUnmounted(() => {
 
 <style scoped>
 .scrim { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.45); animation: fade 0.15s var(--ease); }
-.drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(820px, 100vw); display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-pop); animation: slide 0.25s var(--ease); }
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; max-width: 100vw; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-pop); animation: slide 0.25s var(--ease); }
+.drawer.dragging { user-select: none; }
+.drawer.dragging .out { pointer-events: none; }
+.grip { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; z-index: 2; cursor: col-resize; touch-action: none; }
+.grip::after { content: ''; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: var(--accent); opacity: 0; transition: opacity 0.15s var(--ease); }
+.grip:hover::after, .grip:focus-visible::after, .dragging .grip::after { opacity: 1; }
+.grip:focus-visible { outline: none; }
 header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 12px 12px 20px; }
 .titles { min-width: 0; display: grid; gap: 4px; }
 h2 { font-size: 15px; font-weight: 600; }
