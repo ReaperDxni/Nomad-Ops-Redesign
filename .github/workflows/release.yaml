@@ -11,6 +11,10 @@ env:
 
 jobs:
   docker:
+    # The default token of a repository is read-only; pushing the image to ghcr.io needs packages: write.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         node-version: [20.x]
