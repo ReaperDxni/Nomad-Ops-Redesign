@@ -1,5 +1,8 @@
 # nomad-ops
 
+> **Redesign fork.** This repository is a redesign of [nomad-ops/nomad-ops](https://github.com/nomad-ops/nomad-ops) (frontend rewritten in Vue 3 with Vue Flow). The backend and the original code are by the nomad-ops authors and used under the MIT License, see [LICENSE](LICENSE).
+
+
 A simple operator for nomad which reconciles the running jobs in comparison to git repos
 
 > Still work in progress, but it should do what it is supposed to :)  
