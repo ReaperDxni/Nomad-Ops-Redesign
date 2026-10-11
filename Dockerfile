@@ -1,14 +1,14 @@
 ARG ARG_BUILDNUMBER=none
 
 # build the frontend
-FROM node:16.18.0-alpine3.16 AS frontendbuilder
+FROM node:20-alpine AS frontendbuilder
 
 WORKDIR /app
 
 COPY frontend/package.json ./
 COPY frontend/package-lock.json ./
 
-RUN npm install
+RUN npm ci
 
 COPY frontend/ .
 

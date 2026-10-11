@@ -1,0 +1,29 @@
+# Dev deployment: builds the image (Go backend + Vue frontend) and runs it.
+#
+#   NOMAD_ADDR=http://<nomad-host>:4646 NOMAD_TOKEN=<token> docker compose -f docker-compose.dev.yaml up -d --build
+#
+# UI:       http://<host>:8080/
+# Admin UI: http://<host>:8080/_/
+services:
+  nomad-ops:
+    build: .
+    image: nomad-ops:dev
+    restart: unless-stopped
+    command: ["serve", "--http", "0.0.0.0:8080", "--dir", "/data/pb_data"]
+    ports:
+      - "8080:8080"
+    environment:
+      NOMAD_ADDR: ${NOMAD_ADDR:?set NOMAD_ADDR to your Nomad address}
+      NOMAD_TOKEN: ${NOMAD_TOKEN:-}
+      NOMAD_OPS_LOCAL_REPO_DIR: /data/repos
+      POCKETBASE_APP_URL: ${POCKETBASE_APP_URL:-http://localhost:8080}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@nomad-ops.org}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-simple-nomad-ops}
+      DEFAULT_USER_EMAIL: ${DEFAULT_USER_EMAIL:-user@nomad-ops.org}
+      DEFAULT_USER_PASSWORD: ${DEFAULT_USER_PASSWORD:-simple-nomad-ops}
+      TRACE: "FALSE"
+    volumes:
+      - nomad-ops-data:/data
+
+volumes:
+  nomad-ops-data:
