@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { X, RefreshCw, Copy, WrapText, ArrowDownToLine, Search, ChevronsDown } from 'lucide-vue-next'
 import type { LogTarget } from '../lib/resourceGraph'
 import { LOG_TAIL_BYTES, NomadApi, type LogStream } from '../services/api'
@@ -11,15 +11,16 @@ const emit = defineEmits<{ close: [] }>()
 
 type Level = 'err' | 'warn' | 'info'
 interface Token { cls: '' | 'k' | 'v'; s: string }
-interface Row { time?: string; fullTime?: string; level?: string; lvl?: Level; src?: string; msg: Token[]; raw: string }
+interface Row { stream?: LogStream; time?: string; fullTime?: string; level?: string; lvl?: Level; src?: string; msg: Token[]; raw: string }
 
 const index = ref(props.start ?? 0)
-const stream = ref<LogStream>('stdout')
 const follow = ref(true)
 const wrap = ref(true)
 const filter = ref('')
 const levelFilter = ref<'all' | 'warn' | 'err'>('all')
-const raw = ref('')
+const rawOut = ref('')
+const rawErr = ref('')
+const partial = ref<string>()
 const loading = ref(true)
 const error = ref<string>()
 const updatedAt = ref<Date>()
@@ -79,6 +80,7 @@ const LEVELS: Record<string, Level> = {
   ERROR: 'err', ERR: 'err', FATAL: 'err', PANIC: 'err', CRIT: 'err', CRITICAL: 'err',
 }
 const LINE = /^(\d{4}-\d{2}-\d{2}[T ][\d:.,]+Z?)\s+([A-Za-z]{3,8})\s+(?:\[([^\]]+)\]\s*)?(.*)$/
+const LEVEL_ONLY = /^([A-Za-z]{3,8})\s+(.*)$/
 const TIME_ONLY = /^(\d{4}-\d{2}-\d{2}[T ][\d:.,]+Z?)\s+(.*)$/
 const KV = /([A-Za-z_][\w.-]*)=("[^"]*"|\S*)/g
 
@@ -106,17 +108,45 @@ function parse(line: string): Row {
     return { fullTime: m[1], time: m[1].split(/[T ]/)[1]?.replace('Z', ''), level: m[2].toUpperCase(), lvl: LEVELS[m[2].toUpperCase()], src: m[3], msg: tokens(m[4]), raw: line }
   }
   const t = TIME_ONLY.exec(line)
+  if (!t) {
+    // No timestamp (a container's own stdout, a JVM start line): the level alone still gets its column.
+    const l = LEVEL_ONLY.exec(line)
+    if (l && LEVELS[l[1].toUpperCase()]) return { level: l[1].toUpperCase(), lvl: LEVELS[l[1].toUpperCase()], msg: tokens(l[2]), raw: line }
+  }
   if (t) return { fullTime: t[1], time: t[1].split(/[T ]/)[1]?.replace('Z', ''), lvl: guess(t[2]), msg: tokens(t[2]), raw: line }
   return { lvl: guess(line), msg: tokens(line), raw: line }
 }
 
 // The tail is cut at a byte offset, so its first line is usually half a line: leave it out and say so.
-const truncated = computed(() => raw.value.length >= LOG_TAIL_BYTES)
-const rows = computed<Row[]>(() => {
-  const all = raw.value.split('\n')
+const truncated = computed(() => rawOut.value.length >= LOG_TAIL_BYTES || rawErr.value.length >= LOG_TAIL_BYTES)
+function rowsOf(text: string, stream: LogStream): Row[] {
+  const all = text.split('\n')
   if (all[all.length - 1] === '') all.pop()
-  return (truncated.value ? all.slice(1) : all).map(parse)
+  return (text.length >= LOG_TAIL_BYTES ? all.slice(1) : all).map((line) => ({ ...parse(line), stream }))
+}
+const epoch = (r: Row) => Date.parse(`${(r.fullTime ?? '').replace(' ', 'T').replace(',', '.')}${/(Z|[+-]\d\d:?\d\d)$/.test(r.fullTime ?? '') ? '' : 'Z'}`)
+
+const outRows = computed(() => rowsOf(rawOut.value, 'stdout'))
+const errRows = computed(() => rowsOf(rawErr.value, 'stderr'))
+const hasData = computed(() => outRows.value.length + errRows.value.length > 0)
+const hasBoth = computed(() => outRows.value.length > 0 && errRows.value.length > 0)
+// stdout and stderr run in one list: by time when every line has one, else stdout first and stderr after it.
+const interleaved = computed(() => {
+  const all = [...outRows.value, ...errRows.value]
+  return all.length > 0 && all.every((r) => r.fullTime && !Number.isNaN(epoch(r)))
 })
+const rows = computed<Row[]>(() => {
+  const all = [...outRows.value, ...errRows.value]
+  return interleaved.value ? all.sort((a, b) => epoch(a) - epoch(b)) : all
+})
+const mixedUnordered = computed(() => hasBoth.value && !interleaved.value)
+// Clicking "stdout" or "stderr" marks that stream's lines in the list; nothing is hidden or split off.
+const mark = reactive<Record<LogStream, boolean>>({ stdout: false, stderr: false })
+const isMarked = (r: Row) => !!r.stream && mark[r.stream]
+// A column nobody fills is not shown, so logs without timestamps do not start with a wide empty gutter.
+const hasTime = computed(() => rows.value.some((r) => r.time))
+const hasLevel = computed(() => rows.value.some((r) => r.level))
+const cols = computed(() => [hasTime.value ? '96px' : '', hasLevel.value ? '46px' : '', 'minmax(0, 1fr)'].filter(Boolean).join(' '))
 const counts = computed(() => ({
   err: rows.value.filter((r) => r.lvl === 'err').length,
   warn: rows.value.filter((r) => r.lvl === 'warn').length,
@@ -129,6 +159,7 @@ const shown = computed(() => {
     && (!q || r.raw.toLowerCase().includes(q)),
   )
 })
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 function hl(s: string): { s: string; hit: boolean }[] {
   const q = query.value
@@ -154,11 +185,20 @@ async function load(initial = false) {
   controller?.abort()
   controller = new AbortController()
   const mine = ++run
-  if (initial) { loading.value = true; raw.value = '' }
+  if (initial) { loading.value = true; rawOut.value = ''; rawErr.value = ''; partial.value = undefined }
   try {
-    const text = await NomadApi.logs(t.allocId, t.task, stream.value, t.namespace, controller.signal)
+    const [out, err] = await Promise.allSettled([
+      NomadApi.logs(t.allocId, t.task, 'stdout', t.namespace, controller.signal),
+      NomadApi.logs(t.allocId, t.task, 'stderr', t.namespace, controller.signal),
+    ])
     if (mine !== run) return
-    raw.value = text
+    const failed = [out, err].find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (failed && (failed.reason as Error).name === 'AbortError') return
+    if (out.status === 'rejected' && err.status === 'rejected') throw out.reason
+    // One stream failing leaves the other readable: keep what was read last and say so.
+    if (out.status === 'fulfilled') rawOut.value = out.value
+    if (err.status === 'fulfilled') rawErr.value = err.value
+    partial.value = failed ? `${out.status === 'rejected' ? 'stdout' : 'stderr'} could not be read` : undefined
     error.value = undefined
     updatedAt.value = new Date()
   } catch (e) {
@@ -188,14 +228,14 @@ let timer: number | undefined
 function schedule() {
   window.clearInterval(timer)
   // Stay quiet while nothing could be read at all (the allocation is gone or not started): "Try again" resumes it.
-  if (follow.value) timer = window.setInterval(() => { if (!(error.value && !raw.value)) load() }, 3000)
+  if (follow.value) timer = window.setInterval(() => { if (!(error.value && !hasData.value)) load() }, 3000)
 }
 watch(follow, (on) => { schedule(); if (on) { load(); scrollToEnd() } })
-watch([index, stream], () => load(true))
+watch(index, () => load(true))
 watch([levelFilter, query], () => { if (follow.value) scrollToEnd() })
 
 async function copy() {
-  if (await copyText(shown.value.map((r) => r.raw).join('\n'))) toast.success(`Copied ${shown.value.length} lines`)
+  if (await copyText(shown.value.map((r) => r.raw).join('\n'))) toast.success(`Copied ${plural(shown.value.length, 'line')}`)
   else toast.error('Could not copy to the clipboard')
 }
 
@@ -242,15 +282,20 @@ onUnmounted(() => {
           </select>
 
           <div class="row">
-            <div class="seg" role="group" aria-label="Output stream">
-              <button :class="{ on: stream === 'stdout' }" :aria-pressed="stream === 'stdout'" @click="stream = 'stdout'">stdout</button>
-              <button :class="{ on: stream === 'stderr' }" :aria-pressed="stream === 'stderr'" @click="stream = 'stderr'">stderr</button>
-            </div>
 
-            <div class="seg" role="group" aria-label="Level">
+            <div v-if="counts.warn + counts.err > 0 || levelFilter !== 'all'" class="seg" role="group" aria-label="Level">
               <button :class="{ on: levelFilter === 'all' }" :aria-pressed="levelFilter === 'all'" @click="levelFilter = 'all'">All</button>
               <button class="w" :class="{ on: levelFilter === 'warn' }" :aria-pressed="levelFilter === 'warn'" @click="levelFilter = 'warn'">Warnings <b>{{ counts.warn + counts.err }}</b></button>
               <button class="e" :class="{ on: levelFilter === 'err' }" :aria-pressed="levelFilter === 'err'" @click="levelFilter = 'err'">Errors <b>{{ counts.err }}</b></button>
+            </div>
+
+            <div v-if="hasData" class="seg marks" role="group" aria-label="Mark output streams">
+              <button class="so" :class="{ on: mark.stdout }" :aria-pressed="mark.stdout" :disabled="!outRows.length" title="Mark the lines written to stdout" @click="mark.stdout = !mark.stdout">
+                <i class="dot" /> stdout <b>{{ outRows.length }}</b>
+              </button>
+              <button class="se" :class="{ on: mark.stderr }" :aria-pressed="mark.stderr" :disabled="!errRows.length" title="Mark the lines written to stderr" @click="mark.stderr = !mark.stderr">
+                <i class="dot" /> stderr <b>{{ errRows.length }}</b>
+              </button>
             </div>
 
             <label class="find">
@@ -270,20 +315,21 @@ onUnmounted(() => {
         </div>
 
         <div class="stage">
-          <div ref="scroller" class="out" :class="{ wrap }" tabindex="0" role="log" aria-live="off" @scroll.passive="onScroll">
-            <div v-if="loading && !raw" class="note muted">Loading logs…</div>
-            <div v-else-if="error && !raw" class="note">
+          <div ref="scroller" class="out" :class="{ wrap }" :style="{ '--cols': cols }" tabindex="0" role="log" aria-live="off" @scroll.passive="onScroll">
+            <div v-if="loading && !hasData" class="note muted">Loading logs…</div>
+            <div v-else-if="error && !hasData" class="note">
               <strong>Logs are not available</strong>
               <p class="muted">{{ error }}. The allocation may be gone, or its node unreachable.</p>
               <button class="btn sm" @click="load(true)">Try again</button>
             </div>
-            <div v-else-if="!rows.length" class="note muted">No {{ stream }} output yet.</div>
+            <div v-else-if="!rows.length" class="note muted">No output yet.</div>
             <div v-else-if="!shown.length" class="note muted">No lines match your search or level filter.</div>
             <template v-else>
-              <div v-for="(r, i) in shown" :key="i" class="ln" :class="r.lvl">
-                <span class="t" :title="r.fullTime">{{ r.time ?? '' }}</span>
-                <span class="lv">{{ r.level ?? '' }}</span>
+              <div v-for="(r, i) in shown" :key="i" class="ln" :class="[r.lvl, isMarked(r) ? (r.stream === 'stderr' ? 'se' : 'so') : '']">
+                <span v-if="hasTime" class="t" :title="r.fullTime">{{ r.time ?? '' }}</span>
+                <span v-if="hasLevel" class="lv">{{ r.level ?? '' }}</span>
                 <span class="body">
+                  <span v-if="isMarked(r)" class="tag" :title="`Written to ${r.stream}`">{{ r.stream }}</span>
                   <span v-if="r.src" class="src">{{ r.src }}</span>
                   <span v-for="(t, ti) in r.msg" :key="ti" :class="t.cls"><template v-for="(p, pi) in hl(t.s)" :key="pi"><mark v-if="p.hit">{{ p.s }}</mark><template v-else>{{ p.s }}</template></template></span>
                 </span>
@@ -294,11 +340,13 @@ onUnmounted(() => {
         </div>
 
         <footer>
-          <span><b>{{ shown.length }}</b><template v-if="shown.length !== rows.length"> of {{ rows.length }}</template> lines</span>
+          <span><b>{{ shown.length }}</b><template v-if="shown.length !== rows.length"> of {{ rows.length }}</template> line{{ (shown.length === rows.length ? shown.length : rows.length) === 1 ? '' : 's' }}</span>
           <span v-if="counts.err" class="e">{{ counts.err }} error{{ counts.err === 1 ? '' : 's' }}</span>
           <span v-if="counts.warn" class="w">{{ counts.warn }} warning{{ counts.warn === 1 ? '' : 's' }}</span>
           <span v-if="truncated" class="muted">last {{ LOG_TAIL_BYTES / 1024 }} KB only</span>
-          <span v-if="error && raw" class="w">reload failed, showing the last read</span>
+          <span v-if="mixedUnordered" class="muted" title="These lines carry no timestamps, so Nomad gives no common order">stdout first, then stderr</span>
+          <span v-if="partial" class="w">{{ partial }}</span>
+          <span v-if="error && hasData" class="w">reload failed, showing the last read</span>
           <span class="grow" />
           <span v-if="updatedAt" class="muted">Updated {{ updatedAt.toLocaleTimeString() }}</span>
         </footer>
@@ -344,7 +392,7 @@ h2 { font-size: 15px; font-weight: 600; }
 .stage { position: relative; flex: 1; min-height: 0; display: flex; }
 .out { flex: 1; min-width: 0; overflow: auto; padding: 6px 0 10px; background: var(--bg); font: 12px/1.65 var(--mono); }
 .out:focus-visible { outline-offset: -2px; }
-.ln { display: grid; grid-template-columns: 96px 46px 1fr; gap: 0 10px; padding: 1px 16px; color: var(--text-2); }
+.ln { display: grid; grid-template-columns: var(--cols, 1fr); gap: 0 10px; padding: 1px 16px; color: var(--text-2); }
 .ln:hover { background: var(--surface); }
 .ln.warn { background: var(--warn-bg); }
 .ln.err { background: var(--err-bg); }
@@ -354,6 +402,24 @@ h2 { font-size: 15px; font-weight: 600; }
 .ln.err .lv { color: var(--err); }
 .body { min-width: 0; white-space: pre; }
 .wrap .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Stream marks: stdout is blue, stderr is the accent violet; a warning or error keeps its own tint on top. */
+.marks button .dot { width: 7px; height: 7px; border-radius: 2px; background: var(--text-3); }
+.marks button:disabled { opacity: 0.45; cursor: not-allowed; }
+.marks .so.on { background: var(--busy-bg); color: var(--busy); }
+.marks .so.on .dot { background: var(--busy); }
+.marks .so.on b { background: var(--busy-bg); color: var(--busy); }
+.marks .se.on { background: var(--accent-bg); color: var(--accent-strong); }
+.marks .se.on .dot { background: var(--accent-strong); }
+.marks .se.on b { background: var(--accent-bg); color: var(--accent-strong); }
+.ln.so { background: var(--busy-bg); }
+.ln.so.warn { background: linear-gradient(var(--warn-bg), var(--warn-bg)), var(--busy-bg); }
+.ln.so.err { background: linear-gradient(var(--err-bg), var(--err-bg)), var(--busy-bg); }
+.ln.se { background: var(--accent-bg); }
+.ln.se.warn { background: linear-gradient(var(--warn-bg), var(--warn-bg)), var(--accent-bg); }
+.ln.se.err { background: linear-gradient(var(--err-bg), var(--err-bg)), var(--accent-bg); }
+.tag { display: inline-block; margin-right: 8px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; line-height: 1.5; vertical-align: 1px; user-select: none; }
+.so .tag { background: var(--busy-bg); color: var(--busy); }
+.se .tag { background: var(--accent-bg); color: var(--accent-strong); }
 .src { color: var(--accent-strong); margin-right: 8px; opacity: 0.85; }
 .src::before { content: '['; opacity: 0.5; } .src::after { content: ']'; opacity: 0.5; }
 .k { color: var(--text-3); }

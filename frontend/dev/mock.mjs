@@ -32,6 +32,15 @@ const allocs = {
 // is chatty enough to exceed the 64 KB tail the UI reads.
 const startedAt = Date.now()
 const logText = (id, task, type) => {
+  // A task that only writes plain, unstamped lines to stderr (nothing on stdout).
+  if (task === 'log-shipper') return type === 'stderr' ? 'Listening on http://[::]:3000\n' : ''
+  // Container output without timestamps, like a JVM start script: the UI must not reserve empty columns for it.
+  if (id === 'c0ffee00-0004' && type === 'stderr') {
+    return [
+      'INFO exec -a "java" java -XX:MaxRAMPercentage=80.0 -XX:+UseParallelGC -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=20 -XX:GCTimeRatio=4 -Dquarkus.http.host=0.0.0.0 -cp "." -jar /deployments/quarkus-run.jar',
+      'INFO running in /deployments',
+    ].join('\n') + '\n'
+  }
   const grown = Math.floor((Date.now() - startedAt) / 2000)
   const count = (id === 'c0ffee00-0004' ? 900 : 40) + grown
   const paths = ['/api/payments', '/api/refunds', '/healthz', '/api/orders/42', '/metrics']
