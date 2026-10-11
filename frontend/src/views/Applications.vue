@@ -80,23 +80,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       <aside class="filters" aria-label="Filters">
         <section>
           <h3>Sync status</h3>
-          <label v-for="m in SOURCE_STATUSES" :key="m.key" class="check f">
-            <input type="checkbox" :checked="statusFilter.has(m.key)" @change="toggle(statusFilter, m.key); statusFilter = new Set(statusFilter)" />
+          <button v-for="m in SOURCE_STATUSES" :key="m.key" type="button" class="f" :class="{ on: statusFilter.has(m.key) }" :aria-pressed="statusFilter.has(m.key)" @click="toggle(statusFilter, m.key); statusFilter = new Set(statusFilter)">
             <i class="dot" :class="`d-${m.tone}`" />
             <span>{{ m.label }}</span>
             <span class="n">{{ statusCounts[m.key] }}</span>
-          </label>
+          </button>
         </section>
         <section>
           <h3>Teams</h3>
-          <label class="check f">
-            <input v-model="mineOnly" type="checkbox" />
+          <button type="button" class="f" :class="{ on: mineOnly }" :aria-pressed="mineOnly" @click="mineOnly = !mineOnly">
             <span>My applications</span>
-          </label>
-          <label v-for="t in teamList" :key="t.id" class="check f">
-            <input type="checkbox" :checked="teamFilter.has(t.id)" @change="toggle(teamFilter, t.id); teamFilter = new Set(teamFilter)" />
+          </button>
+          <button v-for="t in teamList" :key="t.id" type="button" class="f" :class="{ on: teamFilter.has(t.id) }" :aria-pressed="teamFilter.has(t.id)" @click="toggle(teamFilter, t.id); teamFilter = new Set(teamFilter)">
             <span>{{ t.name }}</span>
-          </label>
+          </button>
           <p v-if="!teamList.length" class="muted">No teams yet.</p>
         </section>
         <button v-if="filtering" class="btn sm" @click="clearFilters">Clear filters</button>
@@ -172,7 +169,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .filters { border-right: 1px solid var(--border); padding: 16px 14px; display: flex; flex-direction: column; gap: 22px; overflow: auto; }
 .filters h3 { font-size: 12px; font-weight: 500; color: var(--text-3); margin-bottom: 8px; }
 .filters section { display: grid; gap: 2px; }
-.f { padding: 4px 0; font-size: 13px; }
+.f { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 8px; margin: 0; border: 0; border-radius: var(--radius); background: none; color: var(--text-2); font-size: 13px; text-align: left; transition: background 0.15s var(--ease), color 0.15s var(--ease); }
+.f:hover { background: var(--surface-3); color: var(--text); }
+.f.on { background: var(--accent-bg); color: var(--accent-strong); font-weight: 500; }
 .f .n { margin-left: auto; font: 11px var(--mono); color: var(--text-3); }
 .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .d-ok { background: var(--ok); } .d-warn { background: var(--warn); } .d-err { background: var(--err); } .d-busy { background: var(--busy); } .d-idle { background: var(--idle); }
