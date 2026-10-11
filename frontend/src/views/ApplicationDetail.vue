@@ -5,18 +5,20 @@ import { VueFlow, useVueFlow, type NodeMouseEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
-import { ArrowLeft, RefreshCw, Pause, Play, Trash2, Users, ExternalLink, X, FolderGit2 } from 'lucide-vue-next'
+import { ArrowLeft, RefreshCw, Pause, Play, Trash2, Users, ExternalLink, X, FolderGit2, ScrollText, GitBranch, Boxes, Layers, Container, Copy, GitCompareArrows } from 'lucide-vue-next'
 import StatusBadge from '../components/StatusBadge.vue'
 import ResourceNode from '../components/ResourceNode.vue'
 import JsonTree from '../components/JsonTree.vue'
 import Modal from '../components/Modal.vue'
+import LogsDrawer from '../components/LogsDrawer.vue'
 import CheckList from '../components/CheckList.vue'
 import { keys, sources, teams, vaultTokens } from '../stores/realtime'
 import { NomadApi, SourceApi } from '../services/api'
-import { buildResourceGraph, type ResourceData } from '../lib/resourceGraph'
+import { buildResourceGraph, type LogTarget, type ResourceData } from '../lib/resourceGraph'
 import { firstId, type Allocation } from '../lib/types'
 import { timeAgo } from '../lib/status'
 import { toast } from '../stores/toast'
+import { copyText } from '../lib/clipboard'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -30,6 +32,23 @@ const selected = ref<{ id: string; data: ResourceData } | null>(null)
 const editingTeams = ref(false)
 const teamDraft = ref<string[]>([])
 const confirmDelete = ref(false)
+const logs = ref<{ targets: LogTarget[]; start: number; title: string } | null>(null)
+
+const KIND: Record<string, { icon: unknown; label: string }> = {
+  source: { icon: GitBranch, label: 'Source' }, job: { icon: Boxes, label: 'Job' },
+  group: { icon: Layers, label: 'Task group' }, alloc: { icon: Container, label: 'Allocation' },
+}
+async function copyValue(v: string) {
+  if (await copyText(v)) toast.success('Copied')
+  else toast.error('Could not copy to the clipboard')
+}
+const allocCount = (data: ResourceData) => new Set((data.logTargets ?? []).map((t) => t.allocId)).size
+
+function openLogs(data: ResourceData, task?: string) {
+  const targets = data.logTargets ?? []
+  const start = task ? Math.max(0, targets.findIndex((t) => t.task === task)) : 0
+  logs.value = { targets, start, title: data.title }
+}
 
 const { fitView, onNodeClick, onPaneClick } = useVueFlow()
 onNodeClick(({ node }: NodeMouseEvent) => { selected.value = { id: node.id, data: node.data } })
@@ -164,20 +183,41 @@ const minimapColor = (n: any) => ({ ok: '#4fd18b', warn: '#f0b24a', err: '#f2645
 
       <aside v-if="selected" class="panel" aria-label="Resource details">
         <header>
-          <strong>{{ selected.data.title }}</strong>
+          <span class="ico"><component :is="KIND[selected.data.kind]?.icon" /></span>
+          <div class="who">
+            <span class="kind">{{ KIND[selected.data.kind]?.label }}</span>
+            <strong :title="selected.data.title">{{ selected.data.title }}</strong>
+          </div>
           <button class="btn ghost icon sm" aria-label="Close details" @click="selected = null"><X /></button>
         </header>
-        <div class="state" :class="`tone-${selected.data.tone}`"><i class="dot" /> {{ selected.data.stateLabel }}</div>
-        <dl>
-          <template v-for="[k, v] in selected.data.facts" :key="k"><dt>{{ k }}</dt><dd class="mono">{{ v }}</dd></template>
+
+        <div class="pill" :class="`tone-${selected.data.tone}`"><i class="dot" :class="{ pulse: selected.data.pulse }" /> {{ selected.data.stateLabel }}</div>
+
+        <dl class="facts">
+          <div v-for="[k, v] in selected.data.facts" :key="k" class="fact">
+            <dt>{{ k }}</dt>
+            <dd><span class="mono" :title="v">{{ v }}</span><button class="copy" :aria-label="`Copy ${k}`" title="Copy" @click="copyValue(v)"><Copy /></button></dd>
+          </div>
         </dl>
-        <div v-if="selected.data.tasks?.length">
-          <h4>Tasks</h4>
-          <ul class="tl"><li v-for="t in selected.data.tasks" :key="t.name" :class="`tone-${t.tone}`"><i class="dot" /><span class="mono">{{ t.name }}</span><span>{{ t.state }}</span></li></ul>
-        </div>
+
+        <section v-if="selected.data.tasks?.length" class="tasks">
+          <h4>Tasks <span class="n">{{ selected.data.tasks.length }}</span></h4>
+          <ul>
+            <li v-for="t in selected.data.tasks" :key="t.name" :class="`tone-${t.tone}`">
+              <i class="dot" />
+              <span class="name mono">{{ t.name }}</span>
+              <span class="st">{{ t.state }}</span>
+              <button class="btn sm" :aria-label="`Logs of ${t.name}`" @click="openLogs(selected.data, t.name)"><ScrollText /> Logs</button>
+            </li>
+          </ul>
+        </section>
+
         <div class="acts">
-          <a v-if="nomadLink(selected.data.nomadPath)" class="btn" :href="nomadLink(selected.data.nomadPath)" target="_blank" rel="noopener"><ExternalLink /> Open in Nomad</a>
-          <button v-if="selected.data.diffJob" class="btn" @click="tab = 'diff'">View diff</button>
+          <button v-if="selected.data.logTargets?.length" class="btn primary wide" @click="openLogs(selected.data)">
+            <ScrollText /> {{ selected.data.kind === 'group' ? `View logs · ${allocCount(selected.data)} allocation${allocCount(selected.data) === 1 ? '' : 's'}` : 'View logs' }}
+          </button>
+          <button v-if="selected.data.diffJob" class="btn wide" @click="tab = 'diff'"><GitCompareArrows /> View diff</button>
+          <a v-if="nomadLink(selected.data.nomadPath)" class="btn wide" :href="nomadLink(selected.data.nomadPath)" target="_blank" rel="noopener"><ExternalLink /> Open in Nomad</a>
         </div>
       </aside>
     </div>
@@ -207,6 +247,7 @@ const minimapColor = (n: any) => ({ ok: '#4fd18b', warn: '#f0b24a', err: '#f2645
       </dl>
     </div>
 
+    <LogsDrawer v-if="logs" :targets="logs.targets" :start="logs.start" :title="logs.title" @close="logs = null" />
     <Modal v-if="editingTeams" title="Manage teams" @close="editingTeams = false">
       <CheckList v-model="teamDraft" :options="teamOptions" empty="No teams yet. Create one on the Teams page." />
       <template #footer>
@@ -238,20 +279,35 @@ const minimapColor = (n: any) => ({ ok: '#4fd18b', warn: '#f0b24a', err: '#f2645
 .warn { color: var(--warn); font-size: 12px; }
 .tree { position: relative; flex: 1; min-height: 0; }
 .hint-card { position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%); max-width: 420px; padding: 10px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-2); text-align: center; }
-.panel { position: absolute; top: 12px; right: 12px; bottom: 12px; width: 320px; max-width: calc(100% - 24px); overflow: auto; display: grid; gap: 14px; align-content: start; padding: 14px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); animation: slide 0.22s var(--ease); z-index: 5; }
-.panel > header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.panel strong { font-size: 14px; word-break: break-all; }
-.panel h4 { font-size: 12px; color: var(--text-3); font-weight: 500; margin-bottom: 6px; }
-.panel dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
-.panel dt { color: var(--text-3); }
-.panel dd { margin: 0; word-break: break-all; font-size: 12px; }
-.state, .tl li { display: flex; align-items: center; gap: 7px; color: var(--tone); font-weight: 500; }
-.tl { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-.tl li span:last-child { margin-left: auto; font-size: 12px; }
-.tl li span.mono { color: var(--text); font-weight: 400; }
+.panel { position: absolute; top: 12px; right: 12px; bottom: 12px; width: 340px; max-width: calc(100% - 24px); overflow: auto; display: flex; flex-direction: column; gap: 16px; padding: 16px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); animation: slide 0.22s var(--ease); z-index: 5; }
+.panel > header { display: flex; align-items: center; gap: 12px; }
+.panel .ico { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--surface-3); color: var(--text-2); flex: none; }
+.panel .ico svg { width: 17px; height: 17px; }
+.panel .who { display: grid; min-width: 0; flex: 1; line-height: 1.25; }
+.panel .kind { font-size: 11px; color: var(--text-3); }
+.panel .who strong { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { display: inline-flex; align-items: center; gap: 7px; align-self: flex-start; height: 24px; padding: 0 10px; border-radius: 12px; font-size: 12px; font-weight: 500; color: var(--tone); background: color-mix(in srgb, var(--tone) 13%, transparent); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tone); flex: none; }
+.dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.facts { margin: 0; display: grid; border-top: 1px solid var(--border); }
+.fact { display: grid; gap: 2px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.fact dt { font-size: 11px; color: var(--text-3); }
+.fact dd { margin: 0; display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.fact dd .mono { flex: 1; min-width: 0; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.copy { display: grid; place-items: center; width: 22px; height: 22px; flex: none; margin-top: -2px; border: 0; border-radius: 6px; background: none; color: var(--text-3); opacity: 0; transition: opacity 0.15s var(--ease), background 0.15s var(--ease); }
+.copy svg { width: 13px; height: 13px; }
+.fact:hover .copy, .copy:focus-visible { opacity: 1; }
+.copy:hover { background: var(--surface-3); color: var(--text); }
+.tasks h4 { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12px; font-weight: 500; color: var(--text-3); }
+.tasks .n { font: 500 11px var(--mono); background: var(--surface-3); padding: 1px 6px; border-radius: 8px; }
+.tasks ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.tasks li { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); }
+.tasks .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text); }
+.tasks .st { font-size: 12px; color: var(--tone); }
 .tone-ok { --tone: var(--ok); } .tone-warn { --tone: var(--warn); } .tone-err { --tone: var(--err); } .tone-busy { --tone: var(--busy); } .tone-idle { --tone: var(--idle); }
-.acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.acts { display: grid; gap: 8px; margin-top: auto; padding-top: 4px; }
+.acts .wide { width: 100%; justify-content: center; height: 32px; }
 .acts a.btn { text-decoration: none; }
 .pad { padding: 20px; }
 .diff { margin-bottom: 24px; }

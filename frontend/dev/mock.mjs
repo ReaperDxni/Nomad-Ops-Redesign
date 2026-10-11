@@ -28,6 +28,26 @@ const allocs = {
   'payments-api': [alloc('a1b2c3d4-0001', 'api', 'running', [['server', 'running'], ['log-shipper', 'running']]), alloc('a1b2c3d4-0002', 'api', 'running', [['server', 'running'], ['log-shipper', 'running']]), alloc('e5f6a7b8-0003', 'worker', 'pending', [['worker', 'pending']])],
   'payments-cron': [alloc('c0ffee00-0004', 'cron', 'running', [['cron', 'running']])],
 }
+// Fake task logs. They grow by a line every 2 seconds so "Follow" has something to follow; the cron allocation
+// is chatty enough to exceed the 64 KB tail the UI reads.
+const startedAt = Date.now()
+const logText = (id, task, type) => {
+  const grown = Math.floor((Date.now() - startedAt) / 2000)
+  const count = (id === 'c0ffee00-0004' ? 900 : 40) + grown
+  const paths = ['/api/payments', '/api/refunds', '/healthz', '/api/orders/42', '/metrics']
+  const out = []
+  for (let i = 0; i < count; i++) {
+    const ts = new Date(startedAt - (count - i) * 2000).toISOString()
+    const p = paths[i % paths.length]
+    if (type === 'stderr') {
+      if (i % 9 === 0) out.push(`${ts} WARN  [${task}] slow upstream response path=${p} ms=${800 + (i % 7) * 40}`)
+      else if (i % 23 === 0) out.push(`${ts} ERROR [${task}] connection reset by peer while calling ledger:8080 attempt=${1 + (i % 3)}`)
+    } else {
+      out.push(`${ts} INFO  [${task}] handled request path=${p} status=${i % 17 === 0 ? 500 : 200} ms=${5 + (i % 31)} alloc=${id.slice(0, 8)}`)
+    }
+  }
+  return out.length ? out.join('\n') + '\n' : ''
+}
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
 const token = `${b64({ alg: 'HS256' })}.${b64({ exp: 4102444800, id: 'u1', type: 'authRecord' })}.sig`
 
@@ -55,6 +75,17 @@ http.createServer((req, res) => {
     { ID: 'e5f6a7b8-0003', JobID: 'payments-api', TaskGroup: 'worker', NodeID: 'n2bbbbbb-2', ClientStatus: 'pending' },
     { ID: 'c0ffee00-0004', JobID: 'checkout-web', TaskGroup: 'web', NodeID: 'n2bbbbbb-2', ClientStatus: 'running' },
     { ID: 'dead0000-0005', JobID: 'mailer', TaskGroup: 'm', NodeID: 'n3cccccc-3', ClientStatus: 'failed' }])
+  if ((m = u.pathname.match(/^\/api\/nomad\/proxy\/v1\/client\/fs\/logs\/([^/]+)$/))) {
+    const id = decodeURIComponent(m[1])
+    const task = u.searchParams.get('task') ?? 'task'
+    const type = u.searchParams.get('type') === 'stderr' ? 'stderr' : 'stdout'
+    const offset = Number(u.searchParams.get('offset')) || 65536
+    // The pending allocation has no output yet: Nomad answers with an error, so the drawer's error state shows.
+    if (id === 'e5f6a7b8-0003') { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('task not started') }
+    const text = logText(id, task, type)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(text.length > offset ? text.slice(text.length - offset) : text)
+  }
   if (u.pathname === '/api/nomad/urls') return json({ ui: 'http://nomad.local:4646' })
   if ((m = u.pathname.match(/^\/api\/nomad\/proxy\/v1\/job\/([^/]+)\/allocations/))) return json(allocs[decodeURIComponent(m[1])] ?? [])
   json({}, 404)

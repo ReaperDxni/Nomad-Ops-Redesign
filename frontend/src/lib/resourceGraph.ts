@@ -4,6 +4,15 @@ import { nomadTone, sourceStatus, type Tone } from './status'
 
 export type ResourceKind = 'source' | 'job' | 'group' | 'alloc' | 'cluster' | 'server' | 'dc' | 'node'
 
+/** One stream of output the logs drawer can show: a task of an allocation. */
+export interface LogTarget {
+  allocId: string
+  namespace: string
+  task: string
+  /** What the picker shows, for example `payments-api · api · a1b2c3d4 / server`. */
+  label: string
+}
+
 export interface ResourceData {
   kind: ResourceKind
   title: string
@@ -15,6 +24,8 @@ export interface ResourceData {
   tasks?: Array<{ name: string; state: string; tone: Tone }>
   nomadPath?: string
   diffJob?: string
+  /** Where logs can be read for this box: the tasks of an allocation, or of every allocation of a task group. */
+  logTargets?: LogTarget[]
 }
 
 export const NODE_W = 248
@@ -57,6 +68,12 @@ export function buildResourceGraph(
           pulse: a.ClientStatus === 'pending',
           facts: [['Allocation', a.ID], ['Client status', a.ClientStatus], ['Desired', a.DesiredStatus ?? '-'], ['Node', a.NodeName ?? '-']],
           tasks,
+          logTargets: tasks.map((t) => ({
+            allocId: a.ID,
+            namespace: job.namespace || source.namespace || 'default',
+            task: t.name,
+            label: `${jobName} · ${g} · ${a.ID.slice(0, 8)} / ${t.name}`,
+          })),
         }
         return { id: `alloc:${a.ID}`, data, children: [], h: nodeHeight(data), y: 0, span: 0 }
       })
@@ -69,6 +86,7 @@ export function buildResourceGraph(
         tone,
         stateLabel: allocTrees.length ? toneLabel[tone] : 'No allocations',
         facts: [['Task group', g], ['Desired count', count === undefined ? '-' : String(count)], ['Allocations', String(allocTrees.length)]],
+        logTargets: allocTrees.flatMap((t) => t.data.logTargets ?? []),
       }
       return { id: `group:${jobName}:${g}`, data, children: allocTrees, h: nodeHeight(data), y: 0, span: 0 }
     })

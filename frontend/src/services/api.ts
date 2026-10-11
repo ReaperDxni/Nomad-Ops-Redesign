@@ -32,7 +32,25 @@ async function nomadGet(path: string) {
   return resp.status === 204 ? [] : resp.json()
 }
 
+/** A plain-text answer of the Nomad proxy (task logs); the proxy labels everything as JSON, so read it as text. */
+async function nomadText(path: string, signal?: AbortSignal): Promise<string> {
+  const resp = await fetch(pb.buildUrl(path), { headers: { Authorization: pb.authStore.token }, signal })
+  if (!resp.ok) throw new Error(`Nomad answered ${resp.status}`)
+  return resp.text()
+}
+
+export type LogStream = 'stdout' | 'stderr'
+/** The size of the tail the drawer reads, in bytes. */
+export const LOG_TAIL_BYTES = 64 * 1024
+
 export const NomadApi = {
+  /** The last bytes of a task's stdout or stderr. `plain=true` returns the raw text instead of Nomad's framed JSON. */
+  logs: (allocId: string, task: string, type: LogStream, namespace: string, signal?: AbortSignal): Promise<string> =>
+    nomadText(
+      `/api/nomad/proxy/v1/client/fs/logs/${encodeURIComponent(allocId)}?task=${encodeURIComponent(task)}&type=${type}`
+      + `&plain=true&follow=false&origin=end&offset=${LOG_TAIL_BYTES}&namespace=${encodeURIComponent(namespace || 'default')}`,
+      signal,
+    ),
   urls: (): Promise<{ ui: string }> => nomadGet('/api/nomad/urls'),
   nodes: (): Promise<any[]> => nomadGet('/api/nomad/proxy/v1/nodes'),
   members: (): Promise<{ Members?: any[] }> => nomadGet('/api/nomad/proxy/v1/agent/members'),
